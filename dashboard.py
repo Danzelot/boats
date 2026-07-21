@@ -60,8 +60,11 @@ def load_data(db_path="finn_boats.db"):
 def main():
     st.markdown('<p class="main-header">⛵ Finn.no Sailing Boat Explorer</p>', unsafe_allow_html=True)
     
+    # Database path selection
+    db_path = st.sidebar.text_input("Database path", value="finn_boats.db", help="Path to SQLite database file")
+    
     # Load data
-    df = load_data()
+    df = load_data(db_path)
     
     if df.empty:
         st.warning("No data loaded. Please run the scraper with --scrape-details first.")
