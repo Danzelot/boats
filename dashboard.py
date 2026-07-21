@@ -193,11 +193,12 @@ def main():
         return
 
     # --- Main Dashboard ---
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Overview",
         "📈 Price Analysis", 
         "🔬 Deep Dive",
-        "📋 Listings"
+        "📋 Listings",
+        "💰 Price History"
     ])
 
     # TAB 1: Overview
@@ -545,6 +546,128 @@ def main():
                         st.caption(f"FINN Code: {row['finn_code']}")
                     if row.get('date_updated'):
                         st.caption(f"Updated: {row['date_updated']}")
+
+    # TAB 5: Price History
+    with tab5:
+        st.header("💰 Price History")
+        
+        # Load price history data
+        conn = sqlite3.connect(db_path)
+        ph_df = pd.read_sql_query("SELECT * FROM price_history ORDER BY scraped_at DESC", conn)
+        conn.close()
+        
+        if ph_df.empty:
+            st.info("No price history available. Run the scraper multiple times with --scrape-details to track price changes.")
+        else:
+            st.metric("Total price entries", len(ph_df))
+            unique_boats = ph_df['boat_id'].nunique()
+            st.metric("Boats tracked", unique_boats)
+            
+            # Filter to boats in current view
+            if len(filtered_df) > 0:
+                filtered_boat_ids = filtered_df['id'].tolist()
+                ph_df_filtered = ph_df[ph_df['boat_id'].isin(filtered_boat_ids)]
+            else:
+                ph_df_filtered = ph_df
+            
+            if len(ph_df_filtered) > 0:
+                st.subheader(f"Price History for Filtered Results ({len(ph_df_filtered)} entries)")
+            else:
+                st.info("No price history for filtered results")
+            
+            # Price changes only
+            changes_df = ph_df_filtered.dropna(subset=['previous_price']).copy()
+            if len(changes_df) > 0:
+                changes_df['change_sign'] = changes_df['change_amount'].apply(lambda x: '📈' if x > 0 else '📉')
+                changes_df['formatted_change'] = changes_df.apply(
+                    lambda row: f"{row['previous_price']:,.0f} → {row['price']:,.0f} NOK ({row['change_sign']} {abs(row['change_amount']):,.0f}, {row['change_percent']:+.1f}%)",
+                    axis=1
+                )
+                
+                st.subheader("Price Changes")
+                st.dataframe(
+                    changes_df[['boat_id', 'formatted_change', 'scraped_at']],
+                    use_container_width=True,
+                    height=300
+                )
+                
+                # Statistics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total changes", len(changes_df))
+                with col2:
+                    increases = len(changes_df[changes_df['change_amount'] > 0])
+                    st.metric("Price increases", increases)
+                with col3:
+                    decreases = len(changes_df[changes_df['change_amount'] < 0])
+                    st.metric("Price decreases", decreases)
+                with col4:
+                    avg_change = changes_df['change_amount'].mean()
+                    st.metric("Avg change", f"{avg_change:,.0f} NOK")
+                
+                # Visualizations
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("Price Change Distribution")
+                    fig = px.histogram(
+                        changes_df,
+                        x="change_amount",
+                        nbins=30,
+                        title="Distribution of Price Changes",
+                        labels={"change_amount": "Change Amount (NOK)", "count": "Frequency"},
+                        color_discrete_sequence=['royalblue']
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    st.subheader("Price Change % Distribution")
+                    fig = px.histogram(
+                        changes_df,
+                        x="change_percent",
+                        nbins=30,
+                        title="Distribution of Price Changes %",
+                        labels={"change_percent": "Change %", "count": "Frequency"},
+                        color_discrete_sequence=['green']
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                # Time series of price changes
+                st.subheader("Price Changes Over Time")
+                if 'scraped_at' in changes_df.columns:
+                    changes_df['date'] = pd.to_datetime(changes_df['scraped_at']).dt.date
+                    daily_changes = changes_df.groupby('date').agg({
+                        'change_amount': ['count', 'sum', 'mean']
+                    }).reset_index()
+                    daily_changes.columns = ['date', 'count', 'total_change', 'avg_change']
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=daily_changes['date'],
+                        y=daily_changes['count'],
+                        mode='lines+markers',
+                        name='Number of Changes',
+                        line=dict(color='blue', width=2)
+                    ))
+                    fig.update_layout(
+                        title="Daily Price Changes",
+                        xaxis_title="Date",
+                        yaxis_title="Number of Changes",
+                        hovermode='x unified'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No price changes recorded yet. All entries are initial prices.")
+                
+                # Show all price history
+                st.subheader("All Price Entries")
+                display_df = ph_df_filtered.copy()
+                display_df['formatted_price'] = display_df['price'].apply(lambda x: f"{x:,.0f} NOK")
+                st.dataframe(
+                    display_df[['boat_id', 'formatted_price', 'scraped_at']],
+                    use_container_width=True,
+                    height=300
+                )
 
     # --- Footer ---
     st.markdown("---")

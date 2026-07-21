@@ -130,6 +130,76 @@ def clean_and_analyze_boats(db_path="finn_boats.db"):
             print(f"  {fuel:25s} - {count:3d} boats")
         print()
     
+    # Price history analysis
+    print("=" * 70)
+    print("PRICE HISTORY ANALYSIS")
+    print("=" * 70)
+    print()
+    
+    conn = get_db_connection(db_path)
+    if conn:
+        ph_df = pd.read_sql_query("SELECT * FROM price_history ORDER BY scraped_at", conn)
+        conn.close()
+        
+        if not ph_df.empty:
+            print(f"Total price history entries: {len(ph_df)}")
+            
+            # Count boats with price history
+            unique_boats = ph_df['boat_id'].nunique()
+            print(f"Boats with price history: {unique_boats}")
+            print()
+            
+            # Price changes (entries with previous_price)
+            changes_df = ph_df.dropna(subset=['previous_price'])
+            if len(changes_df) > 0:
+                print("PRICE CHANGES:")
+                print("-" * 50)
+                
+                # Summary stats
+                avg_change = changes_df['change_amount'].mean()
+                avg_change_pct = changes_df['change_percent'].mean()
+                price_increases = len(changes_df[changes_df['change_amount'] > 0])
+                price_decreases = len(changes_df[changes_df['change_amount'] < 0])
+                
+                print(f"  Total price changes: {len(changes_df)}")
+                print(f"  Price increases: {price_increases}")
+                print(f"  Price decreases: {price_decreases}")
+                print(f"  Average change: {avg_change:,.0f} NOK ({avg_change_pct:+.1f}%)")
+                print()
+                
+                # Largest changes
+                if len(changes_df) > 0:
+                    largest_increase = changes_df.nlargest(1, 'change_amount')
+                    largest_decrease = changes_df.nsmallest(1, 'change_amount')
+                    
+                    print("LARGEST CHANGES:")
+                    print("-" * 50)
+                    if len(largest_increase) > 0:
+                        row = largest_increase.iloc[0]
+                        print(f"  📈 Largest increase: {row['boat_id']} +{row['change_amount']:,.0f} NOK ({row['change_percent']:+.1f}%)")
+                    if len(largest_decrease) > 0:
+                        row = largest_decrease.iloc[0]
+                        print(f"  📉 Largest decrease: {row['boat_id']} {row['change_amount']:,.0f} NOK ({row['change_percent']:+.1f}%)")
+                    print()
+            else:
+                print("  No price changes recorded yet (all entries are initial prices)")
+                print()
+            
+            # Recent entries
+            print("RECENT PRICE UPDATES:")
+            print("-" * 50)
+            recent = ph_df.tail(10)
+            for _, row in recent.iterrows():
+                if pd.notna(row['previous_price']):
+                    change_sign = "+" if row['change_amount'] >= 0 else ""
+                    print(f"  {row['boat_id']}: {row['previous_price']:,.0f} -> {row['price']:,.0f} NOK ({change_sign}{row['change_amount']:,.0f}, {change_sign}{row['change_percent']:.1f}%)")
+                else:
+                    print(f"  {row['boat_id']}: Initial price {row['price']:,.0f} NOK")
+            print()
+        else:
+            print("No price history data available. Run the scraper multiple times to track changes.")
+            print()
+    
     print("=" * 70)
     print("VISUALIZATION")
     print("=" * 70)
