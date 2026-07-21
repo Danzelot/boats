@@ -38,7 +38,7 @@ def get_db_connection(db_path="finn_boats.db"):
 
 
 def initialize_database(conn):
-    """Create boats table if not exists."""
+    """Create boats and price_history tables if not exists."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS boats (
             id TEXT PRIMARY KEY,
@@ -76,6 +76,20 @@ def initialize_database(conn):
             registration_number TEXT,
             boat_location TEXT,
             finn_code TEXT
+        )
+    """)
+    
+    # Create price history table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS price_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            boat_id TEXT NOT NULL,
+            price REAL NOT NULL,
+            previous_price REAL,
+            change_amount REAL,
+            change_percent REAL,
+            scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (boat_id) REFERENCES boats(id)
         )
     """)
     conn.commit()
@@ -365,15 +379,21 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
     
     inserted_count = 0
     updated_count = 0
+    price_changes = 0
+    new_listings = 0
     
     for boat in boats_data:
         try:
-            # Check if already exists
+            # Check if already exists and get current price for history tracking
             existing = conn.execute(
-                "SELECT id FROM boats WHERE id = ?", (boat['id'],)
+                "SELECT id, price FROM boats WHERE id = ?", (boat['id'],)
             ).fetchone()
             
             if existing:
+                # Get existing price for history tracking
+                existing_price = existing['price']
+                new_price = boat['price']
+                
                 # Update existing record
                 conn.execute("""
                     UPDATE boats SET 
@@ -404,6 +424,28 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                     boat.get('boat_location'), boat.get('finn_code'),
                     boat['id']
                 ))
+                
+                # Track price history if price changed
+                if existing_price != new_price and existing_price is not None and new_price is not None:
+                    change_amount = new_price - existing_price
+                    change_percent = (change_amount / existing_price * 100) if existing_price != 0 else 0
+                    
+                    conn.execute("""
+                        INSERT INTO price_history 
+                        (boat_id, price, previous_price, change_amount, change_percent)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        boat['id'],
+                        new_price,
+                        existing_price,
+                        change_amount,
+                        change_percent
+                    ))
+                    if verbose:
+                        change_sign = "+" if change_amount >= 0 else ""
+                        print(f"   [Price Change] {boat['id']}: {existing_price:,.0f} -> {new_price:,.0f} NOK ({change_sign}{change_amount:,.0f}, {change_sign}{change_percent:.1f}%)")
+                    price_changes += 1
+                
                 updated_count += 1
                 if verbose:
                     print(f"   [Debug] Updated boat {boat.get('id')}")
@@ -435,6 +477,25 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                     boat.get('sleeping_capacity'), boat.get('color'), boat.get('registration_number'),
                     boat.get('boat_location'), boat.get('finn_code')
                 ))
+                
+                # Record initial price in history
+                new_price = boat['price']
+                if new_price is not None:
+                    conn.execute("""
+                        INSERT INTO price_history 
+                        (boat_id, price, previous_price, change_amount, change_percent)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        boat['id'],
+                        new_price,
+                        None,  # No previous price for first entry
+                        None,  # No change amount for first entry
+                        None   # No change percent for first entry
+                    ))
+                    if verbose:
+                        print(f"   [New Listing] {boat['id']}: Initial price {new_price:,.0f} NOK")
+                    new_listings += 1
+                
                 inserted_count += 1
             
             conn.commit()
@@ -442,7 +503,19 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
             print(f"   [DB Error] Failed to save boat {boat.get('id')}: {e}")
             conn.rollback()
     
-    print(f"   -> Saved {inserted_count} new boats, updated {updated_count} existing boats to database")
+    # Print summary with price history info
+    summary_parts = []
+    if inserted_count > 0:
+        summary_parts.append(f"{inserted_count} new boats")
+    if updated_count > 0:
+        summary_parts.append(f"{updated_count} updated")
+    if price_changes > 0:
+        summary_parts.append(f"{price_changes} price changes")
+    if new_listings > 0:
+        summary_parts.append(f"{new_listings} with initial prices")
+    
+    if summary_parts:
+        print(f"   -> Saved {', '.join(summary_parts)} to database")
     
     conn.close()
     return inserted_count
