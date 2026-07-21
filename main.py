@@ -35,6 +35,23 @@ def parse_args():
         help="Maximum delay between requests in seconds (default: %(default)s)"
     )
     parser.add_argument(
+        "--scrape-details",
+        action="store_true",
+        help="Fetch individual listing pages for full details (specifications, equipment, etc.)"
+    )
+    parser.add_argument(
+        "--detail-delay-min",
+        type=float,
+        default=1.0,
+        help="Minimum delay between detail page requests (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--detail-delay-max",
+        type=float,
+        default=2.0,
+        help="Maximum delay between detail page requests (default: %(default)s)"
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -52,6 +69,11 @@ def main():
     if args.max_pages:
         print(f"Max pages: {args.max_pages}")
     print(f"Delay range: {args.delay_min}s - {args.delay_max}s")
+    if args.scrape_details:
+        print("Scraping details: ENABLED (will fetch individual listing pages)")
+        print(f"Detail delay range: {args.detail_delay_min}s - {args.detail_delay_max}s")
+    else:
+        print("Scraping details: DISABLED (only basic info from search results)")
     if args.verbose:
         print("Verbose mode: enabled")
     print()
@@ -61,7 +83,9 @@ def main():
         db_path=args.db_path,
         max_pages=args.max_pages,
         delay_range=(args.delay_min, args.delay_max),
-        verbose=args.verbose
+        verbose=args.verbose,
+        scrape_details=args.scrape_details,
+        detail_delay_range=(args.detail_delay_min, args.detail_delay_max)
     )
     
     print("\n" + "="*40)

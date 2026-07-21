@@ -20,6 +20,7 @@ HEADERS = {
 MAX_RETRIES = 3
 RETRY_DELAY = 5.0
 REQUEST_DELAY = (2.5, 5.0)  # Random delay between requests
+DETAIL_DELAY = (1.0, 2.0)  # Random delay between individual listing requests
 
 
 class ScraperError(Exception):
@@ -52,7 +53,28 @@ def initialize_database(conn):
             year_built INTEGER,
             date_created TEXT,
             date_updated TEXT,
-            scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            -- New fields from individual listing pages
+            description TEXT,
+            equipment TEXT,
+            specifications JSON,
+            model TEXT,
+            fuel_type TEXT,
+            engine_included TEXT,
+            engine_size TEXT,
+            engine_manufacturer TEXT,
+            engine_type TEXT,
+            max_speed TEXT,
+            material TEXT,
+            weight TEXT,
+            depth TEXT,
+            width TEXT,
+            seating_capacity TEXT,
+            sleeping_capacity TEXT,
+            color TEXT,
+            registration_number TEXT,
+            boat_location TEXT,
+            finn_code TEXT
         )
     """)
     conn.commit()
@@ -90,14 +112,11 @@ def try_parse_year(value):
     if value is None:
         return None
     try:
-        # Try to parse ISO date format
         if isinstance(value, str):
-            # Try YYYY-MM-DD or similar
             dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
             return dt.year
         return None
     except (ValueError, TypeError):
-        # Try to extract 4-digit year from string
         if isinstance(value, str):
             match = re.search(r'\b(19|20)\d{2}\b', value)
             if match:
@@ -105,8 +124,18 @@ def try_parse_year(value):
         return None
 
 
+def try_parse_int(value):
+    """Safely parse a value to int, return None on failure."""
+    if value is None:
+        return None
+    try:
+        return int(str(value).replace(",", "").replace(" ", ""))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def parse_boat_details(product):
-    """Extract all required fields from a Product LD+JSON object."""
+    """Extract basic fields from a Product LD+JSON object."""
     offers = product.get("offers", {})
     if not isinstance(offers, dict):
         offers = {}
@@ -114,81 +143,188 @@ def parse_boat_details(product):
     url_str = product.get("url", "")
     finn_id = url_str.split("/")[-1] if url_str else None
     
-    # Extract brand and type separately
     brand_obj = product.get("brand", {})
     if isinstance(brand_obj, dict):
         brand = brand_obj.get("name", "")
     else:
         brand = brand_obj or ""
     
-    # Type might be in category or name
     boat_type = product.get("category", "") or ""
     
     # Clean brand - remove type suffix if present
     if brand:
-        # Remove " Seilb\u00e5t/Motorseiler" or similar type suffixes
         brand = re.sub(r'\s*/\s*.*$', '', brand).strip()
         brand = re.sub(r'\s+Seilb\u00e5t/Motorseiler$', '', brand).strip()
         brand = re.sub(r'\s+Seilb\u00e5t$', '', brand).strip()
     
-    # Try to extract location from contentLocation or address
-    location = ""
-    content_location = product.get("contentLocation", {})
-    if isinstance(content_location, dict):
-        location = content_location.get("name", "") or content_location.get("address", "")
-    if not location:
-        address = product.get("address", {})
-        if isinstance(address, dict):
-            location = address.get("addressLocality", "") or address.get("addressRegion", "")
-    
-    # Extract length - check various possible fields
-    length = None
-    additional_properties = product.get("additionalProperty", [])
-    if isinstance(additional_properties, list):
-        for prop in additional_properties:
-            if isinstance(prop, dict):
-                prop_name = prop.get("name", "").lower()
-                if "length" in prop_name or "lengde" in prop_name:
-                    length = try_parse_float(prop.get("value"))
-                    break
-    
-    # Also check for length in the main product properties
-    if length is None:
-        if "length" in product:
-            length = try_parse_float(product.get("length"))
-    
-    # Extract dates
-    date_created = product.get("datePublished")  # Listing creation date
-    date_updated = product.get("dateModified")   # Last update date
-    
-    # Extract year built - check releaseDate or additionalProperty
-    year_built = None
-    release_date = product.get("releaseDate")
-    if release_date:
-        year_built = try_parse_year(release_date)
-    if not year_built:
-        for prop in additional_properties:
-            if isinstance(prop, dict):
-                prop_name = prop.get("name", "").lower()
-                if "year" in prop_name or "\u00e5r" in prop_name or "bygg" in prop_name:
-                    year_built = try_parse_year(prop.get("value"))
-                    break
-    
     return {
         "id": finn_id,
         "price": try_parse_float(offers.get("price")),
-        "length": length,
-        "location": location.strip() if location else None,
+        "length": None,
+        "location": None,
         "brand": brand.strip() if brand else None,
         "type": boat_type.strip() if boat_type else None,
         "announcement_text": product.get("description"),
         "title": product.get("name"),
         "url": url_str,
         "image": product.get("image"),
-        "year_built": year_built,
-        "date_created": date_created,
-        "date_updated": date_updated
+        "year_built": None,
+        "date_created": None,
+        "date_updated": None,
+        # New fields - will be populated from detail page
+        "description": None,
+        "equipment": None,
+        "specifications": None,
+        "model": None,
+        "fuel_type": None,
+        "engine_included": None,
+        "engine_size": None,
+        "engine_manufacturer": None,
+        "engine_type": None,
+        "max_speed": None,
+        "material": None,
+        "weight": None,
+        "depth": None,
+        "width": None,
+        "seating_capacity": None,
+        "sleeping_capacity": None,
+        "color": None,
+        "registration_number": None,
+        "boat_location": None,
+        "finn_code": None
     }
+
+
+def extract_text_after_heading(soup, heading_text):
+    """Extract text content after a specific heading."""
+    for h2 in soup.find_all('h2'):
+        if heading_text in h2.get_text(strip=True):
+            content = []
+            next_node = h2.next_sibling
+            while next_node and next_node.name != 'h2':
+                if next_node.name in ['div', 'p', 'section', 'ul', 'ol', 'li', 'span']:
+                    text = next_node.get_text(strip=True)
+                    if text:
+                        content.append(text)
+                next_node = next_node.next_sibling
+            return ' '.join(content)
+    return None
+
+
+def extract_specification_pairs(soup):
+    """Extract key-value pairs from the specifications section."""
+    specs = {}
+    key_info = soup.find(class_='key-info-section')
+    if key_info:
+        items = key_info.find_all(['dt', 'dd'])
+        for i in range(0, len(items), 2):
+            if i + 1 < len(items):
+                key = items[i].get_text(strip=True)
+                value = items[i + 1].get_text(strip=True)
+                specs[key] = value
+    return specs
+
+
+def extract_ad_info(soup):
+    """Extract advertisement information (date, finn code, etc.)."""
+    info = {}
+    for h2 in soup.find_all('h2'):
+        if 'Annonseinformasjon' in h2.get_text(strip=True):
+            content = h2.get_text(strip=True)
+            # Parse the text for FINN code and dates
+            text = extract_text_after_heading(soup, 'Annonseinformasjon')
+            if text:
+                # Extract FINN-kode
+                finn_code_match = re.search(r'FINN-kode\s*(\d+)', text)
+                if finn_code_match:
+                    info['finn_code'] = finn_code_match.group(1)
+                
+                # Extract Sist oppdatert (Last updated)
+                date_match = re.search(r'Sist oppdatert\s*(\d+\.?\s*\w+\s*\d{4})', text)
+                if date_match:
+                    info['date_updated'] = date_match.group(1)
+    return info
+
+
+def scrape_listing_detail(url: str, verbose: bool = False) -> Optional[Dict]:
+    """Scrape detailed information from an individual listing page."""
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        if response.status_code != 200:
+            if verbose:
+                print(f"   [Debug] Detail page {url} returned status {response.status_code}")
+            return None
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Extract all sections
+        description = extract_text_after_heading(soup, 'Beskrivelse')
+        equipment = extract_text_after_heading(soup, 'Utstyr')
+        specifications = extract_specification_pairs(soup)
+        ad_info = extract_ad_info(soup)
+        location = extract_text_after_heading(soup, 'Sted')
+        
+        # Parse specifications into individual fields
+        # Extract numeric values from text (e.g., "38 fot" -> 38.0)
+        def extract_numeric(value):
+            """Extract numeric value from text like '38 fot' or '7 200 kg'."""
+            if value is None:
+                return None
+            # Try to extract first number
+            match = re.search(r'([\d]+(?:[.,]\d+)?)', str(value))
+            if match:
+                return try_parse_float(match.group(1))
+            return None
+        
+        specs_dict = {
+            "model": specifications.get('Modell'),
+            "year_built": try_parse_year(specifications.get('Modellår')),
+            "type": specifications.get('Type'),
+            "fuel_type": specifications.get('Drivstoff'),
+            "engine_included": specifications.get('Motor inkludert'),
+            "engine_size": specifications.get('Motorstørrelse'),
+            "engine_manufacturer": specifications.get('Motorfabrikant'),
+            "engine_type": specifications.get('Type motor'),
+            "max_speed": specifications.get('Topphastighet'),
+            "material": specifications.get('Byggemateriale'),
+            "weight": specifications.get('Vekt'),
+            "length": extract_numeric(specifications.get('Lengde i fot')),
+            "depth": extract_numeric(specifications.get('Dybde')),
+            "width": extract_numeric(specifications.get('Bredde')),
+            "seating_capacity": specifications.get('Sitteplasser'),
+            "sleeping_capacity": specifications.get('Soveplasser'),
+            "color": specifications.get('Farge'),
+            "registration_number": specifications.get('Registreringsnummer'),
+            "boat_location": specifications.get('Båtens beliggenhet'),
+        }
+        
+        # Parse year_built
+        year_text = specifications.get('Modellår')
+        if year_text:
+            specs_dict['year_built'] = try_parse_year(year_text)
+        
+        return {
+            "description": description,
+            "equipment": equipment,
+            "specifications": json.dumps(specifications, ensure_ascii=False),
+            "date_updated": ad_info.get('date_updated'),
+            "finn_code": ad_info.get('finn_code'),
+            "location": location,
+            **specs_dict
+        }
+    
+    except requests.exceptions.Timeout:
+        if verbose:
+            print(f"   [Warning] Detail page timeout for {url}")
+        return None
+    except requests.exceptions.RequestException as e:
+        if verbose:
+            print(f"   [Error] Detail page request failed for {url}: {e}")
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"   [Error] Detail page parsing failed for {url}: {e}")
+        return None
 
 
 def make_request(url: str, max_retries: int = MAX_RETRIES) -> Optional[str]:
@@ -199,7 +335,6 @@ def make_request(url: str, max_retries: int = MAX_RETRIES) -> Optional[str]:
             if response.status_code == 200:
                 return response.text
             elif response.status_code == 429:
-                # Rate limited
                 retry_after = response.headers.get("Retry-After", RETRY_DELAY)
                 print(f"   [Warning] Rate limited. Retrying after {retry_after} seconds...")
                 time.sleep(float(retry_after) + random.uniform(1, 3))
@@ -245,13 +380,27 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                         brand = ?, type = ?, announcement_text = ?,
                         title = ?, url = ?, image = ?,
                         year_built = ?, date_created = ?, date_updated = ?,
+                        description = ?, equipment = ?, specifications = ?,
+                        model = ?, fuel_type = ?, engine_included = ?,
+                        engine_size = ?, engine_manufacturer = ?, engine_type = ?,
+                        max_speed = ?, material = ?, weight = ?,
+                        depth = ?, width = ?, seating_capacity = ?,
+                        sleeping_capacity = ?, color = ?, registration_number = ?,
+                        boat_location = ?, finn_code = ?,
                         scraped_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                 """, (
-                    boat['price'], boat['length'], boat['location'],
+                    boat['price'], boat.get('length'), boat.get('location'),
                     boat['brand'], boat['type'], boat['announcement_text'],
                     boat['title'], boat['url'], boat['image'],
                     boat.get('year_built'), boat.get('date_created'), boat.get('date_updated'),
+                    boat.get('description'), boat.get('equipment'), boat.get('specifications'),
+                    boat.get('model'), boat.get('fuel_type'), boat.get('engine_included'),
+                    boat.get('engine_size'), boat.get('engine_manufacturer'), boat.get('engine_type'),
+                    boat.get('max_speed'), boat.get('material'), boat.get('weight'),
+                    boat.get('depth'), boat.get('width'), boat.get('seating_capacity'),
+                    boat.get('sleeping_capacity'), boat.get('color'), boat.get('registration_number'),
+                    boat.get('boat_location'), boat.get('finn_code'),
                     boat['id']
                 ))
                 updated_count += 1
@@ -263,13 +412,27 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                     INSERT INTO boats (
                         id, price, length, location, brand, type, 
                         announcement_text, title, url, image,
-                        year_built, date_created, date_updated
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        year_built, date_created, date_updated,
+                        description, equipment, specifications,
+                        model, fuel_type, engine_included,
+                        engine_size, engine_manufacturer, engine_type,
+                        max_speed, material, weight,
+                        depth, width, seating_capacity,
+                        sleeping_capacity, color, registration_number,
+                        boat_location, finn_code
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    boat['id'], boat['price'], boat['length'], boat['location'],
+                    boat['id'], boat['price'], boat.get('length'), boat.get('location'),
                     boat['brand'], boat['type'], boat['announcement_text'],
                     boat['title'], boat['url'], boat['image'],
-                    boat.get('year_built'), boat.get('date_created'), boat.get('date_updated')
+                    boat.get('year_built'), boat.get('date_created'), boat.get('date_updated'),
+                    boat.get('description'), boat.get('equipment'), boat.get('specifications'),
+                    boat.get('model'), boat.get('fuel_type'), boat.get('engine_included'),
+                    boat.get('engine_size'), boat.get('engine_manufacturer'), boat.get('engine_type'),
+                    boat.get('max_speed'), boat.get('material'), boat.get('weight'),
+                    boat.get('depth'), boat.get('width'), boat.get('seating_capacity'),
+                    boat.get('sleeping_capacity'), boat.get('color'), boat.get('registration_number'),
+                    boat.get('boat_location'), boat.get('finn_code')
                 ))
                 inserted_count += 1
             
@@ -313,7 +476,7 @@ def scrape_single_page(url: str, verbose: bool = False) -> List[Dict]:
         if not isinstance(product, dict):
             continue
         parsed = parse_boat_details(product)
-        if parsed and parsed.get('id'):  # Only add if we have an ID
+        if parsed and parsed.get('id'):
             boat_data.append(parsed)
     
     return boat_data
@@ -324,9 +487,16 @@ def scrape_all_pages(
     db_path: str = "finn_boats.db",
     max_pages: Optional[int] = None,
     delay_range: tuple = REQUEST_DELAY,
-    verbose: bool = False
+    verbose: bool = False,
+    scrape_details: bool = False,
+    detail_delay_range: tuple = DETAIL_DELAY
 ) -> int:
-    """Scrape all pages and save to database. Returns total count of new insertions."""
+    """Scrape all pages and save to database. Returns total count of new insertions.
+    
+    Args:
+        scrape_details: If True, fetch individual listing pages for more data
+        detail_delay_range: Delay between individual listing requests
+    """
     all_boats = {}
     page = 1
     total_saved = 0
@@ -365,6 +535,37 @@ def scrape_all_pages(
         sleep_duration = random.uniform(*delay_range)
         print(f"   -> Waiting {sleep_duration:.1f}s before next request...")
         time.sleep(sleep_duration)
+    
+    # Optionally scrape detail pages for each boat
+    if scrape_details and all_boats:
+        print(f"\nScraping detailed information for {len(all_boats)} listings...")
+        detail_count = 0
+        for boat_id, boat in all_boats.items():
+            if boat.get('url'):
+                print(f"  Scraping details for {boat_id}...")
+                details = scrape_listing_detail(boat['url'], verbose=verbose)
+                if details:
+                    # Merge details into boat record
+                    all_boats[boat_id].update(details)
+                    detail_count += 1
+                    # Update length from specifications
+                    if details.get('length'):
+                        all_boats[boat_id]['length'] = details['length']
+                    # Update location
+                    if details.get('location'):
+                        all_boats[boat_id]['location'] = details['location']
+                    # Update year_built
+                    if details.get('year_built'):
+                        all_boats[boat_id]['year_built'] = details['year_built']
+                    # Update date_updated
+                    if details.get('date_updated'):
+                        all_boats[boat_id]['date_updated'] = details['date_updated']
+                
+                # Rate limiting for detail pages
+                sleep_duration = random.uniform(*detail_delay_range)
+                time.sleep(sleep_duration)
+        
+        print(f"   -> Scraped details for {detail_count}/{len(all_boats)} listings")
     
     # Save to database
     if all_boats:
