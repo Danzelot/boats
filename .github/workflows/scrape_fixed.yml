@@ -1,0 +1,44 @@
+name: Daily Finn.no Scraper
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Run scraper
+        run: |
+          python main.py --max-pages 5 --scrape-details --delay-min 3 --delay-max 6 --detail-delay-min 1 --detail-delay-max 3 --verbose
+
+      - name: Commit database
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add finn_boats.db
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto-update: Daily scrape $(date +'%Y-%m-%d') [skip ci]"
+            git push
+          fi
