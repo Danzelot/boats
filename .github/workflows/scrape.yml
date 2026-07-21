@@ -1,0 +1,65 @@
+name: Daily Finn.no Scraper
+
+on:
+  schedule:
+    # Runs at 08:00 UTC (10:00 Norway time) every day
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Run scraper with random jitter
+        run: |
+          python main.py \
+            --max-pages 5 \
+            --scrape-details \
+            --delay-min 3 \
+            --delay-max 6 \
+            --detail-delay-min 1 \
+            --detail-delay-max 3 \
+            --verbose
+
+      - name: Verify database exists and has data
+        run: |
+          if [ ! -f "finn_boats.db" ]; then
+            echo "ERROR: Database file not found after scraping"
+            exit 1
+          fi
+          DB_SIZE=$(stat -f%z finn_boats.db 2>/dev/null || stat -c%s finn_boats.db)
+          if [ "$DB_SIZE" -lt 1000 ]; then
+            echo "ERROR: Database file is too small ($DB_SIZE bytes)"
+            exit 1
+          fi
+
+      - name: Commit database changes
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add finn_boats.db
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto-update: Daily Finn.no scrape $(date +'%Y-%m-%d') [skip ci]"
+            git push origin HEAD
+          else
+            echo "No changes to commit"
+          fi

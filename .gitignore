@@ -10,7 +10,7 @@ wheels/
 .venv
 
 # SQLite database files
-*.db
+# Note: finn_boats.db is intentionally NOT ignored for GitHub Actions deployment
 *.db-journal
 *.sqlite
 *.sqlite-journal

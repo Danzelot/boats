@@ -75,7 +75,9 @@ def initialize_database(conn):
             color TEXT,
             registration_number TEXT,
             boat_location TEXT,
-            finn_code TEXT
+            finn_code TEXT,
+            -- Region field (fylke)
+            region TEXT
         )
     """)
     
@@ -92,6 +94,18 @@ def initialize_database(conn):
             FOREIGN KEY (boat_id) REFERENCES boats(id)
         )
     """)
+    
+    # Add region column to existing boats table if it doesn't exist
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(boats)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "region" not in columns:
+            conn.execute("ALTER TABLE boats ADD COLUMN region TEXT")
+            print("   -> Added 'region' column to boats table")
+    except Exception as e:
+        print(f"   [Warning] Could not check/add region column: {e}")
+    
     conn.commit()
 
 
@@ -206,7 +220,8 @@ def parse_boat_details(product):
         "color": None,
         "registration_number": None,
         "boat_location": None,
-        "finn_code": None
+        "finn_code": None,
+        "region": None
     }
 
 
@@ -318,6 +333,16 @@ def scrape_listing_detail(url: str, verbose: bool = False) -> Optional[Dict]:
         if year_text:
             specs_dict['year_built'] = try_parse_year(year_text)
         
+        # Extract region from location
+        region = None
+        if location:
+            try:
+                from region_mapping import get_region_from_location
+                region = get_region_from_location(location)
+            except ImportError:
+                # region_mapping not available, try to extract first part of location
+                region = location.split()[0] if location else None
+        
         return {
             "description": description,
             "equipment": equipment,
@@ -325,6 +350,7 @@ def scrape_listing_detail(url: str, verbose: bool = False) -> Optional[Dict]:
             "date_updated": ad_info.get('date_updated'),
             "finn_code": ad_info.get('finn_code'),
             "location": location,
+            "region": region,
             **specs_dict
         }
     
@@ -407,7 +433,7 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                         max_speed = ?, material = ?, weight = ?,
                         depth = ?, width = ?, seating_capacity = ?,
                         sleeping_capacity = ?, color = ?, registration_number = ?,
-                        boat_location = ?, finn_code = ?,
+                        boat_location = ?, finn_code = ?, region = ?,
                         scraped_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                 """, (
@@ -421,7 +447,7 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                     boat.get('max_speed'), boat.get('material'), boat.get('weight'),
                     boat.get('depth'), boat.get('width'), boat.get('seating_capacity'),
                     boat.get('sleeping_capacity'), boat.get('color'), boat.get('registration_number'),
-                    boat.get('boat_location'), boat.get('finn_code'),
+                    boat.get('boat_location'), boat.get('finn_code'), boat.get('region'),
                     boat['id']
                 ))
                 
@@ -462,8 +488,8 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                         max_speed, material, weight,
                         depth, width, seating_capacity,
                         sleeping_capacity, color, registration_number,
-                        boat_location, finn_code
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        boat_location, finn_code, region
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     boat['id'], boat['price'], boat.get('length'), boat.get('location'),
                     boat['brand'], boat['type'], boat['announcement_text'],
@@ -475,7 +501,7 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                     boat.get('max_speed'), boat.get('material'), boat.get('weight'),
                     boat.get('depth'), boat.get('width'), boat.get('seating_capacity'),
                     boat.get('sleeping_capacity'), boat.get('color'), boat.get('registration_number'),
-                    boat.get('boat_location'), boat.get('finn_code')
+                    boat.get('boat_location'), boat.get('finn_code'), boat.get('region')
                 ))
                 
                 # Record initial price in history

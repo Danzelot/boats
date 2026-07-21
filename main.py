@@ -1,4 +1,6 @@
 import argparse
+import sys
+import traceback
 from scraper import scrape_all_pages, BASE_URL
 
 
@@ -78,23 +80,32 @@ def main():
         print("Verbose mode: enabled")
     print()
     
-    total_saved = scrape_all_pages(
-        args.base_url,
-        db_path=args.db_path,
-        max_pages=args.max_pages,
-        delay_range=(args.delay_min, args.delay_max),
-        verbose=args.verbose,
-        scrape_details=args.scrape_details,
-        detail_delay_range=(args.detail_delay_min, args.detail_delay_max)
-    )
-    
-    print("\n" + "="*40)
-    if total_saved > 0:
-        print(f"SUCCESS: Saved {total_saved} new boat listings to {args.db_path}")
-    else:
-        print("WARNING: No new boat listings were saved")
-    print("="*40)
+    try:
+        total_saved = scrape_all_pages(
+            args.base_url,
+            db_path=args.db_path,
+            max_pages=args.max_pages,
+            delay_range=(args.delay_min, args.delay_max),
+            verbose=args.verbose,
+            scrape_details=args.scrape_details,
+            detail_delay_range=(args.detail_delay_min, args.detail_delay_max)
+        )
+        
+        print("\n" + "="*40)
+        if total_saved > 0:
+            print(f"SUCCESS: Saved {total_saved} new boat listings to {args.db_path}")
+        else:
+            print("INFO: No new boat listings were saved (existing data may have been updated)")
+        print("="*40)
+        return 0
+        
+    except Exception as e:
+        print("\n" + "="*40)
+        print(f"ERROR: Scraping failed with exception: {e}")
+        print("="*40)
+        traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

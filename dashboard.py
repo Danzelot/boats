@@ -144,6 +144,12 @@ def main():
         locations += sorted([l for l in df["location"].dropna().unique() if l and l.strip()])
     selected_location = st.sidebar.selectbox("Location", locations)
 
+    # Region (fylke) filter
+    regions = ["All"]
+    if "region" in df.columns:
+        regions += sorted([r for r in df["region"].dropna().unique() if r and r.strip() and r != "Unknown"])
+    selected_region = st.sidebar.selectbox("Region (Fylke)", regions)
+
     # --- Apply Filters ---
     filtered_df = df.copy()
 
@@ -180,6 +186,9 @@ def main():
     if selected_location != "All" and "location" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["location"] == selected_location]
 
+    if selected_region != "All" and "region" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["region"] == selected_region]
+
     if equipment_keyword and "equipment" in filtered_df.columns:
         equipment_mask = filtered_df["equipment"].fillna("").str.contains(
             equipment_keyword, case=False, na=False
@@ -196,12 +205,13 @@ def main():
         return
 
     # --- Main Dashboard ---
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Overview",
         "📈 Price Analysis", 
         "🔬 Deep Dive",
         "📋 Listings",
-        "💰 Price History"
+        "💰 Price History",
+        "🗺️ Region Analysis"
     ])
 
     # TAB 1: Overview
@@ -502,6 +512,10 @@ def main():
                 expander_title += " - N/A"
             
             with st.expander(expander_title):
+                # Add direct link button at the top
+                if row.get('url'):
+                    st.link_button("🔗 Open on Finn.no", row['url'])
+                
                 col1, col2 = st.columns([2, 1])
 
                 with col1:
@@ -515,6 +529,8 @@ def main():
                         details.append(f"📏 Length: {row['length']:.1f} ft")
                     if row.get('location'):
                         details.append(f"📍 Location: {row['location']}")
+                    if row.get('region'):
+                        details.append(f"🗺️ Region: {row['region']}")
                     if row.get('material'):
                         details.append(f"🏗️ Material: {row['material']}")
                     if row.get('engine_manufacturer') and row.get('engine_size'):
@@ -671,6 +687,125 @@ def main():
                     use_container_width=True,
                     height=300
                 )
+
+    # TAB 6: Region Analysis
+    with tab6:
+        st.header("🗺️ Price Analysis by Region (Fylke)")
+        
+        region_df = filtered_df[filtered_df["region"].notna()]
+        
+        if len(region_df) == 0:
+            st.info("No region data available. Run the scraper with --scrape-details to get region information.")
+        else:
+            # Overview metrics by region
+            st.subheader("Regional Market Overview")
+            
+            region_stats = region_df.groupby("region").agg({
+                "price": ["mean", "min", "max", "count"],
+                "length": "mean",
+                "age": "mean"
+            }).round(0)
+            
+            region_stats.columns = ["Avg Price", "Min Price", "Max Price", "Count", "Avg Length", "Avg Age"]
+            region_stats = region_stats.sort_values("Count", ascending=False)
+            
+            # Display summary table
+            st.dataframe(region_stats, use_container_width=True)
+            
+            st.markdown("---")
+            
+            # Visualizations
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Average price by region
+                st.subheader("Average Price by Region")
+                avg_price_region = region_df.groupby("region")["price"].mean().sort_values(ascending=False)
+                fig = px.bar(
+                    x=avg_price_region.values,
+                    y=avg_price_region.index,
+                    orientation='h',
+                    title="Average Boat Price by Fylke",
+                    labels={'x': 'Average Price (NOK)', 'y': 'Region'},
+                    color=avg_price_region.values,
+                    color_continuous_scale='Viridis'
+                )
+                fig.update_layout(showlegend=False, height=500)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                # Number of listings by region
+                st.subheader("Listings Count by Region")
+                region_counts = region_df["region"].value_counts()
+                fig = px.bar(
+                    x=region_counts.values,
+                    y=region_counts.index,
+                    orientation='h',
+                    title="Number of Listings by Fylke",
+                    labels={'x': 'Count', 'y': 'Region'},
+                    color=region_counts.values,
+                    color_continuous_scale='Blues'
+                )
+                fig.update_layout(showlegend=False, height=500)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Price distribution by region
+            st.subheader("Price Distribution by Region")
+            
+            # Get top regions by count
+            top_regions = region_df["region"].value_counts().head(8).index
+            region_df_top = region_df[region_df["region"].isin(top_regions)]
+            
+            if len(region_df_top) > 0:
+                fig = px.box(
+                    region_df_top,
+                    x="region",
+                    y="price",
+                    title="Price Distribution by Region (Top 8 by listings)",
+                    labels={"price": "Price (NOK)", "region": "Region"},
+                    color="region"
+                )
+                fig.update_layout(showlegend=False, xaxis_tickangle=-45)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Price vs Length by Region
+            st.subheader("Price vs Length Colored by Region")
+            length_region_df = region_df.dropna(subset=["length"])
+            if len(length_region_df) > 0:
+                fig = px.scatter(
+                    length_region_df,
+                    x="length",
+                    y="price",
+                    color="region",
+                    hover_data=["brand", "year_built", "model"],
+                    title="Price by Length and Region",
+                    labels={
+                        "length": "Length (feet)",
+                        "price": "Price (NOK)",
+                        "region": "Region"
+                    }
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Regional price per foot analysis
+            st.subheader("Price per Foot Analysis by Region")
+            length_region_df = region_df.dropna(subset=["length", "price"]).copy()
+            if len(length_region_df) > 0:
+                length_region_df["price_per_foot"] = length_region_df["price"] / length_region_df["length"]
+                
+                price_per_foot_region = length_region_df.groupby("region")["price_per_foot"].mean().sort_values(ascending=False)
+                
+                fig = px.bar(
+                    x=price_per_foot_region.values,
+                    y=price_per_foot_region.index,
+                    orientation='h',
+                    title="Average Price per Foot by Region",
+                    labels={'x': 'Price per Foot (NOK)', 'y': 'Region'},
+                    color=price_per_foot_region.values,
+                    color_continuous_scale='Reds'
+                )
+                fig.update_layout(showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
 
     # --- Footer ---
     st.markdown("---")
