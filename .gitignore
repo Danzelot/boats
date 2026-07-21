@@ -8,3 +8,15 @@ wheels/
 
 # Virtual environments
 .venv
+
+# SQLite database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+
+# CSV files (legacy)
+*.csv
+
+# Output images
+*.png
