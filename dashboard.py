@@ -33,17 +33,7 @@ def load_data(db_path="finn_boats.db"):
         return pd.DataFrame()
     
     conn = sqlite3.connect(db_path)
-    query = """
-        SELECT
-            id, price, length, brand, model, year_built, location,
-            boat_location, material, fuel_type, color,
-            engine_manufacturer, engine_size, type,
-            seating_capacity, sleeping_capacity, weight, depth, width,
-            description, equipment, specifications, finn_code, date_updated,
-            url, image, announcement_text, type as boat_type
-        FROM boats
-        WHERE price IS NOT NULL
-    """
+    query = "SELECT * FROM boats WHERE price IS NOT NULL"
     df = pd.read_sql_query(query, conn)
     conn.close()
 
@@ -52,11 +42,16 @@ def load_data(db_path="finn_boats.db"):
     df = df.dropna(subset=["price"])
     
     # Extract boat type clean name
-    df["type_clean"] = df["boat_type"].fillna("").str.replace("Seilbåt/Motorseiler", "Sailboat").str.strip()
+    # Use 'type' column if it exists, otherwise 'boat_type'
+    type_col = "type" if "type" in df.columns else "boat_type"
+    df["type_clean"] = df[type_col].fillna("").str.replace("Seilbåt/Motorseiler", "Sailboat").str.strip()
     
     # Calculate age
     current_year = pd.Timestamp.now().year
-    df["age"] = current_year - df["year_built"]
+    if "year_built" in df.columns:
+        df["age"] = current_year - df["year_built"]
+    else:
+        df["age"] = None
     
     return df
 
@@ -87,7 +82,7 @@ def main():
     )
 
     # Length range
-    if df["length"].notna().any():
+    if "length" in df.columns and df["length"].notna().any():
         min_length = float(df["length"].min())
         max_length = float(df["length"].max())
         length_range = st.sidebar.slider(
@@ -114,26 +109,36 @@ def main():
         age_range = (0, 50)
 
     # Brand filter
-    brands = ["All"] + sorted([b for b in df["brand"].dropna().unique() if b and b.strip() and b != "Andre"])
+    brands = ["All"]
+    if "brand" in df.columns:
+        brands += sorted([b for b in df["brand"].dropna().unique() if b and b.strip() and b != "Andre"])
     selected_brand = st.sidebar.selectbox("Brand", brands)
 
     # Boat type filter
-    boat_types = ["All"] + sorted([t for t in df["type_clean"].dropna().unique() if t and t.strip()])
+    boat_types = ["All"]
+    if "type_clean" in df.columns:
+        boat_types += sorted([t for t in df["type_clean"].dropna().unique() if t and t.strip()])
     selected_type = st.sidebar.selectbox("Boat Type", boat_types)
 
     # Material filter
-    materials = ["All"] + sorted([m for m in df["material"].dropna().unique() if m and m.strip()])
+    materials = ["All"]
+    if "material" in df.columns:
+        materials += sorted([m for m in df["material"].dropna().unique() if m and m.strip()])
     selected_material = st.sidebar.selectbox("Material", materials)
 
     # Equipment keyword filter
     equipment_keyword = st.sidebar.text_input("Equipment Keyword", "")
 
     # Fuel type filter
-    fuel_types = ["All"] + sorted([f for f in df["fuel_type"].dropna().unique() if f and f.strip()])
+    fuel_types = ["All"]
+    if "fuel_type" in df.columns:
+        fuel_types += sorted([f for f in df["fuel_type"].dropna().unique() if f and f.strip()])
     selected_fuel = st.sidebar.selectbox("Fuel Type", fuel_types)
 
     # Location filter
-    locations = ["All"] + sorted([l for l in df["location"].dropna().unique() if l and l.strip()])
+    locations = ["All"]
+    if "location" in df.columns:
+        locations += sorted([l for l in df["location"].dropna().unique() if l and l.strip()])
     selected_location = st.sidebar.selectbox("Location", locations)
 
     # --- Apply Filters ---
@@ -145,7 +150,7 @@ def main():
         (filtered_df["price"] <= price_range[1])
     ]
 
-    if df["length"].notna().any():
+    if "length" in filtered_df.columns and filtered_df["length"].notna().any():
         filtered_df = filtered_df[
             (filtered_df["length"].isna()) |
             ((filtered_df["length"] >= length_range[0]) & (filtered_df["length"] <= length_range[1]))
@@ -157,22 +162,22 @@ def main():
             ((filtered_df["age"] >= age_range[0]) & (filtered_df["age"] <= age_range[1]))
         ]
 
-    if selected_brand != "All":
+    if selected_brand != "All" and "brand" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["brand"] == selected_brand]
 
-    if selected_type != "All":
+    if selected_type != "All" and "type_clean" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["type_clean"] == selected_type]
 
-    if selected_material != "All":
+    if selected_material != "All" and "material" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["material"] == selected_material]
 
-    if selected_fuel != "All":
+    if selected_fuel != "All" and "fuel_type" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["fuel_type"] == selected_fuel]
 
-    if selected_location != "All":
+    if selected_location != "All" and "location" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["location"] == selected_location]
 
-    if equipment_keyword:
+    if equipment_keyword and "equipment" in filtered_df.columns:
         equipment_mask = filtered_df["equipment"].fillna("").str.contains(
             equipment_keyword, case=False, na=False
         )
@@ -480,52 +485,65 @@ def main():
         
         # Display listings
         for idx, row in page_df.iterrows():
-            with st.expander(f"📌 {row['brand']} {row['model']} - {row['price']:,.0f} NOK - {row['year_built'] if pd.notna(row['year_built']) else 'N/A'}"):
+            # Safely get values with defaults
+            brand = row.get('brand', 'N/A') or 'N/A'
+            model = row.get('model', '') or ''
+            price = row.get('price', 0) or 0
+            year_built = row.get('year_built')
+            
+            expander_title = f"📌 {brand} {model} - {price:,.0f} NOK"
+            if pd.notna(year_built):
+                expander_title += f" - {int(year_built)}"
+            else:
+                expander_title += " - N/A"
+            
+            with st.expander(expander_title):
                 col1, col2 = st.columns([2, 1])
 
                 with col1:
-                    if pd.notna(row['title']):
+                    if row.get('title'):
                         st.markdown(f"**{row['title']}**")
                     
                     details = []
-                    if pd.notna(row['year_built']):
+                    if pd.notna(row.get('year_built')):
                         details.append(f"📅 Year: {int(row['year_built'])}")
-                    if pd.notna(row['length']):
+                    if pd.notna(row.get('length')):
                         details.append(f"📏 Length: {row['length']:.1f} ft")
-                    if pd.notna(row['location']):
+                    if row.get('location'):
                         details.append(f"📍 Location: {row['location']}")
-                    if pd.notna(row['material']):
+                    if row.get('material'):
                         details.append(f"🏗️ Material: {row['material']}")
-                    if pd.notna(row['engine_manufacturer']) and pd.notna(row['engine_size']):
+                    if row.get('engine_manufacturer') and row.get('engine_size'):
                         details.append(f"⚙️ Engine: {row['engine_manufacturer']} {row['engine_size']}")
-                    if pd.notna(row['fuel_type']):
+                    if row.get('fuel_type'):
                         details.append(f"⛽ Fuel: {row['fuel_type']}")
-                    if pd.notna(row['color']):
+                    if row.get('color'):
                         details.append(f"🎨 Color: {row['color']}")
                     
                     if details:
                         st.markdown(" | ".join(details))
                     
-                    if show_description and pd.notna(row['description']):
+                    if show_description and row.get('description'):
                         st.markdown("**Description:**")
                         st.write(row['description'])
 
-                    if show_description and pd.notna(row['equipment']):
+                    if show_description and row.get('equipment'):
                         st.markdown("**Equipment:**")
                         st.write(row['equipment'])
 
                 with col2:
-                    if show_images and pd.notna(row['image']):
+                    if show_images and row.get('image'):
                         try:
                             st.image(row['image'], use_container_width=True)
                         except:
                             st.warning("Could not load image")
                     
-                    st.markdown(f"[View on Finn.no]({row['url']})")
+                    if row.get('url'):
+                        st.markdown(f"[View on Finn.no]({row['url']})")
                     
-                    if pd.notna(row['finn_code']):
+                    if row.get('finn_code'):
                         st.caption(f"FINN Code: {row['finn_code']}")
-                    if pd.notna(row['date_updated']):
+                    if row.get('date_updated'):
                         st.caption(f"Updated: {row['date_updated']}")
 
     # --- Footer ---
