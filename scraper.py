@@ -9,7 +9,8 @@ from typing import Optional, List, Dict
 import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://www.finn.no/mobility/search/boat?class=2188&length_feet_from=33&length_feet_to=42&price_to=980000&sales_form=120&sales_form=121"
+BASE_URL = "https://www.finn.no/mobility/search/boat?class=2188&length_feet_from=35&length_feet_to=42&motor_ad_location=1&sales_form=120"
+# BASE_URL = "https://www.finn.no/mobility/search/boat?class=2188&length_feet_from=33&length_feet_to=42&price_to=980000&sales_form=120&sales_form=121"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -538,11 +539,18 @@ def scrape_all_pages(
     
     # Optionally scrape detail pages for each boat
     if scrape_details and all_boats:
-        print(f"\nScraping detailed information for {len(all_boats)} listings...")
+        total_boats = len(all_boats)
+        print(f"\nScraping detailed information for {total_boats} listings...")
+        print("[" + " " * 50 + "]", end="\r")  # Initial progress bar
         detail_count = 0
-        for boat_id, boat in all_boats.items():
+        
+        for idx, (boat_id, boat) in enumerate(all_boats.items(), 1):
             if boat.get('url'):
-                print(f"  Scraping details for {boat_id}...")
+                # Update progress bar
+                progress = int((idx / total_boats) * 50)
+                bar = "█" * progress + " " * (50 - progress)
+                print(f"[{bar}] {idx}/{total_boats} ({idx/total_boats:.0%}) - {boat_id}", end="\r")
+                
                 details = scrape_listing_detail(boat['url'], verbose=verbose)
                 if details:
                     # Merge details into boat record
@@ -565,7 +573,9 @@ def scrape_all_pages(
                 sleep_duration = random.uniform(*detail_delay_range)
                 time.sleep(sleep_duration)
         
-        print(f"   -> Scraped details for {detail_count}/{len(all_boats)} listings")
+        # Print final progress (new line)
+        print(f"[{'█' * 50}] {total_boats}/{total_boats} (100%)")
+        print(f"   -> Scraped details for {detail_count}/{total_boats} listings")
     
     # Save to database
     if all_boats:
