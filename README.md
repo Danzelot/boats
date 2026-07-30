@@ -2,6 +2,8 @@
 
 An interactive data exploration tool for Finn.no sailing boat listings.
 
+Dashboard available here: https://kpuafdnfdmf3k8rlqrtkwz.streamlit.app/
+
 ## Features
 
 ### Data Collection
