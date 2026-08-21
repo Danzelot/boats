@@ -77,7 +77,17 @@ def initialize_database(conn):
             boat_location TEXT,
             finn_code TEXT,
             -- Region field (fylke)
-            region TEXT
+            region TEXT,
+            -- Lifecycle / status tracking
+            -- date_taken_offline: first scrape run where the listing was
+            --   detected as closed (sold/expired). Proxy for the offline date.
+            date_taken_offline TIMESTAMP,
+            -- status: 'active' | 'sold' | 'expired'
+            status TEXT DEFAULT 'active',
+            -- is_active: 1 while the listing is live, 0 once closed
+            is_active INTEGER DEFAULT 1,
+            -- status_badge: raw badge text from the listing page ('SOLGT'/'Inaktiv')
+            status_badge TEXT
         )
     """)
     
@@ -95,16 +105,25 @@ def initialize_database(conn):
         )
     """)
     
-    # Add region column to existing boats table if it doesn't exist
+    # Lightweight migrations: add any missing columns to an existing
+    # boats table (SQLite can only add columns one at a time).
+    migrations = [
+        ("region", "TEXT"),
+        ("date_taken_offline", "TIMESTAMP"),
+        ("status", "TEXT DEFAULT 'active'"),
+        ("is_active", "INTEGER DEFAULT 1"),
+        ("status_badge", "TEXT"),
+    ]
     try:
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(boats)")
         columns = [row[1] for row in cursor.fetchall()]
-        if "region" not in columns:
-            conn.execute("ALTER TABLE boats ADD COLUMN region TEXT")
-            print("   -> Added 'region' column to boats table")
+        for column_name, column_def in migrations:
+            if column_name not in columns:
+                conn.execute(f"ALTER TABLE boats ADD COLUMN {column_name} {column_def}")
+                print(f"   -> Added '{column_name}' column to boats table")
     except Exception as e:
-        print(f"   [Warning] Could not check/add region column: {e}")
+        print(f"   [Warning] Could not check/add columns: {e}")
     
     conn.commit()
 
@@ -221,7 +240,12 @@ def parse_boat_details(product):
         "registration_number": None,
         "boat_location": None,
         "finn_code": None,
-        "region": None
+        "region": None,
+        # Lifecycle / status - populated from the detail page. A listing that
+        # still shows up in search results is assumed active by default.
+        "status": "active",
+        "is_active": 1,
+        "status_badge": None,
     }
 
 
@@ -269,11 +293,56 @@ def extract_ad_info(soup):
                 if finn_code_match:
                     info['finn_code'] = finn_code_match.group(1)
                 
-                # Extract Sist oppdatert (Last updated)
-                date_match = re.search(r'Sist oppdatert\s*(\d+\.?\s*\w+\s*\d{4})', text)
+                # Extract Sist oppdatert (Last updated). Includes an
+                # optional time component, e.g. "14. juni 2026, 21:06".
+                date_match = re.search(
+                    r'Sist oppdatert\s*(\d+\.?\s*\w+\s*\d{4}(?:,?\s*\d{1,2}:\d{2})?)',
+                    text,
+                )
                 if date_match:
-                    info['date_updated'] = date_match.group(1)
+                    info['date_updated'] = date_match.group(1).strip()
     return info
+
+
+def extract_listing_status(soup):
+    """Determine whether a listing is active, sold, or expired.
+
+    FINN marks closed listings with a status badge next to the title:
+      - "SOLGT"   (w-badge variant="warning")  -> the boat was sold
+      - "Inaktiv" (w-badge variant="negative") -> the ad expired / was
+        taken out of the market by the seller
+
+    Active listings have no such badge. Returns a dict with:
+      status       -> 'active' | 'sold' | 'expired'
+      is_active    -> 1 for active listings, 0 otherwise
+      status_badge -> the raw badge text if present (e.g. 'SOLGT'), else None
+    """
+    badge_text = None
+    for badge in soup.find_all('w-badge'):
+        text = badge.get_text(strip=True)
+        if text:
+            badge_text = text
+            break
+
+    normalized = badge_text.lower() if badge_text else ""
+    if 'solgt' in normalized:
+        status = 'sold'
+    elif 'inaktiv' in normalized:
+        status = 'expired'
+    else:
+        # No badge -> the listing is still live. As a fallback, some
+        # closed pages also show a negative alert banner.
+        alert = soup.find('w-alert', attrs={'variant': 'negative'})
+        if alert and 'ikke lenger tilgjengelig' in alert.get_text(strip=True).lower():
+            status = 'expired'
+        else:
+            status = 'active'
+
+    return {
+        'status': status,
+        'is_active': 1 if status == 'active' else 0,
+        'status_badge': badge_text,
+    }
 
 
 def scrape_listing_detail(url: str, verbose: bool = False) -> Optional[Dict]:
@@ -292,6 +361,7 @@ def scrape_listing_detail(url: str, verbose: bool = False) -> Optional[Dict]:
         equipment = extract_text_after_heading(soup, 'Utstyr')
         specifications = extract_specification_pairs(soup)
         ad_info = extract_ad_info(soup)
+        status_info = extract_listing_status(soup)
         location = extract_text_after_heading(soup, 'Sted')
         
         # Parse specifications into individual fields
@@ -351,6 +421,9 @@ def scrape_listing_detail(url: str, verbose: bool = False) -> Optional[Dict]:
             "finn_code": ad_info.get('finn_code'),
             "location": location,
             "region": region,
+            "status": status_info['status'],
+            "is_active": status_info['is_active'],
+            "status_badge": status_info['status_badge'],
             **specs_dict
         }
     
@@ -410,15 +483,38 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
     
     for boat in boats_data:
         try:
-            # Check if already exists and get current price for history tracking
+            # Check if already exists and get current price/status for tracking
             existing = conn.execute(
-                "SELECT id, price FROM boats WHERE id = ?", (boat['id'],)
+                "SELECT id, price, date_created, status, date_taken_offline "
+                "FROM boats WHERE id = ?", (boat['id'],)
             ).fetchone()
+            
+            # Normalize status info coming from the detail page (falls back to
+            # 'active' for boats that were only seen in search results).
+            boat_status = boat.get('status') or 'active'
+            boat_is_active = boat.get('is_active')
+            if boat_is_active is None:
+                boat_is_active = 1 if boat_status == 'active' else 0
             
             if existing:
                 # Get existing price for history tracking
                 existing_price = existing['price']
                 new_price = boat['price']
+                
+                # Preserve the original creation timestamp (first time we saw it)
+                date_created = existing['date_created']
+                
+                # Record when the listing was first detected as offline. Only
+                # set it on the active -> closed transition; keep it stable
+                # afterwards so we don't overwrite the original offline date.
+                date_taken_offline = existing['date_taken_offline']
+                if boat_is_active == 0 and date_taken_offline is None:
+                    date_taken_offline = datetime.datetime.now().isoformat(
+                        sep=' ', timespec='seconds'
+                    )
+                    if verbose:
+                        print(f"   [Status] {boat['id']}: now {boat_status} "
+                              f"(taken offline {date_taken_offline})")
                 
                 # Update existing record
                 conn.execute("""
@@ -426,7 +522,7 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                         price = ?, length = ?, location = ?,
                         brand = ?, type = ?, announcement_text = ?,
                         title = ?, url = ?, image = ?,
-                        year_built = ?, date_created = ?, date_updated = ?,
+                        year_built = ?, date_updated = ?,
                         description = ?, equipment = ?, specifications = ?,
                         model = ?, fuel_type = ?, engine_included = ?,
                         engine_size = ?, engine_manufacturer = ?, engine_type = ?,
@@ -434,13 +530,15 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                         depth = ?, width = ?, seating_capacity = ?,
                         sleeping_capacity = ?, color = ?, registration_number = ?,
                         boat_location = ?, finn_code = ?, region = ?,
+                        status = ?, is_active = ?, status_badge = ?,
+                        date_taken_offline = ?,
                         scraped_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                 """, (
                     boat['price'], boat.get('length'), boat.get('location'),
                     boat['brand'], boat['type'], boat['announcement_text'],
                     boat['title'], boat['url'], boat['image'],
-                    boat.get('year_built'), boat.get('date_created'), boat.get('date_updated'),
+                    boat.get('year_built'), boat.get('date_updated'),
                     boat.get('description'), boat.get('equipment'), boat.get('specifications'),
                     boat.get('model'), boat.get('fuel_type'), boat.get('engine_included'),
                     boat.get('engine_size'), boat.get('engine_manufacturer'), boat.get('engine_type'),
@@ -448,6 +546,8 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                     boat.get('depth'), boat.get('width'), boat.get('seating_capacity'),
                     boat.get('sleeping_capacity'), boat.get('color'), boat.get('registration_number'),
                     boat.get('boat_location'), boat.get('finn_code'), boat.get('region'),
+                    boat_status, boat_is_active, boat.get('status_badge'),
+                    date_taken_offline,
                     boat['id']
                 ))
                 
@@ -476,6 +576,13 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                 if verbose:
                     print(f"   [Debug] Updated boat {boat.get('id')}")
             else:
+                # New listing: stamp the creation time (first time we see it).
+                # If it is already closed on first sight, also stamp the
+                # offline time so the field is never left NULL for closed ads.
+                now_iso = datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
+                date_created = now_iso
+                date_taken_offline = None if boat_is_active == 1 else now_iso
+                
                 # Insert new record
                 conn.execute("""
                     INSERT INTO boats (
@@ -488,20 +595,22 @@ def save_to_database(boats_data: List[Dict], db_path: str = "finn_boats.db", ver
                         max_speed, material, weight,
                         depth, width, seating_capacity,
                         sleeping_capacity, color, registration_number,
-                        boat_location, finn_code, region
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        boat_location, finn_code, region,
+                        status, is_active, status_badge, date_taken_offline
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     boat['id'], boat['price'], boat.get('length'), boat.get('location'),
                     boat['brand'], boat['type'], boat['announcement_text'],
                     boat['title'], boat['url'], boat['image'],
-                    boat.get('year_built'), boat.get('date_created'), boat.get('date_updated'),
+                    boat.get('year_built'), date_created, boat.get('date_updated'),
                     boat.get('description'), boat.get('equipment'), boat.get('specifications'),
                     boat.get('model'), boat.get('fuel_type'), boat.get('engine_included'),
                     boat.get('engine_size'), boat.get('engine_manufacturer'), boat.get('engine_type'),
                     boat.get('max_speed'), boat.get('material'), boat.get('weight'),
                     boat.get('depth'), boat.get('width'), boat.get('seating_capacity'),
                     boat.get('sleeping_capacity'), boat.get('color'), boat.get('registration_number'),
-                    boat.get('boat_location'), boat.get('finn_code'), boat.get('region')
+                    boat.get('boat_location'), boat.get('finn_code'), boat.get('region'),
+                    boat_status, boat_is_active, boat.get('status_badge'), date_taken_offline
                 ))
                 
                 # Record initial price in history
@@ -667,6 +776,11 @@ def scrape_all_pages(
                     # Update date_updated
                     if details.get('date_updated'):
                         all_boats[boat_id]['date_updated'] = details['date_updated']
+                    # Update lifecycle status (sold / expired / active)
+                    if details.get('status'):
+                        all_boats[boat_id]['status'] = details['status']
+                        all_boats[boat_id]['is_active'] = details.get('is_active')
+                        all_boats[boat_id]['status_badge'] = details.get('status_badge')
                 
                 # Rate limiting for detail pages
                 sleep_duration = random.uniform(*detail_delay_range)

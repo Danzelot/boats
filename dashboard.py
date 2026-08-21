@@ -46,6 +46,17 @@ def load_data(db_path="finn_boats.db"):
     type_col = "type" if "type" in df.columns else "boat_type"
     df["type_clean"] = df[type_col].fillna("").str.replace("Seilbåt/Motorseiler", "Sailboat").str.strip()
     
+    # Normalize lifecycle status columns (older DBs may not have them yet).
+    # status: 'active' | 'sold' | 'expired'; is_active: 1 live, 0 closed.
+    if "status" not in df.columns:
+        df["status"] = "active"
+    df["status"] = df["status"].fillna("active")
+    if "is_active" not in df.columns:
+        df["is_active"] = (df["status"] == "active").astype(int)
+    df["is_active"] = df["is_active"].fillna(0).astype(int)
+    if "date_taken_offline" not in df.columns:
+        df["date_taken_offline"] = None
+    
     # Calculate age
     current_year = pd.Timestamp.now().year
     if "year_built" in df.columns:
@@ -72,6 +83,15 @@ def main():
 
     # --- Sidebar Filters ---
     st.sidebar.header("🔍 Filters")
+
+    # Listing status filter (active / sold / expired)
+    status_options = ["Active only", "All", "Sold", "Expired", "Closed (sold + expired)"]
+    selected_status = st.sidebar.radio(
+        "Listing Status",
+        status_options,
+        index=0,
+        help="Active = still live on Finn. Sold = 'SOLGT' badge. Expired = 'Inaktiv' badge.",
+    )
 
     # Price range
     min_price = float(df["price"].min())
@@ -153,6 +173,17 @@ def main():
     # --- Apply Filters ---
     filtered_df = df.copy()
 
+    # Status filter
+    if selected_status == "Active only":
+        filtered_df = filtered_df[filtered_df["status"] == "active"]
+    elif selected_status == "Sold":
+        filtered_df = filtered_df[filtered_df["status"] == "sold"]
+    elif selected_status == "Expired":
+        filtered_df = filtered_df[filtered_df["status"] == "expired"]
+    elif selected_status == "Closed (sold + expired)":
+        filtered_df = filtered_df[filtered_df["status"].isin(["sold", "expired"])]
+    # "All" -> no status filtering
+
     # Apply filters
     filtered_df = filtered_df[
         (filtered_df["price"] >= price_range[0]) &
@@ -199,6 +230,13 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.metric("Total Listings", len(df))
     st.sidebar.metric("Filtered Results", len(filtered_df))
+
+    # Status breakdown across the whole dataset
+    status_counts = df["status"].value_counts()
+    sc1, sc2, sc3 = st.sidebar.columns(3)
+    sc1.metric("🟢 Active", int(status_counts.get("active", 0)))
+    sc2.metric("💰 Sold", int(status_counts.get("sold", 0)))
+    sc3.metric("⚫ Expired", int(status_counts.get("expired", 0)))
     
     if len(filtered_df) == 0:
         st.warning("No results match your filters. Try adjusting the criteria.")
@@ -505,7 +543,14 @@ def main():
             price = row.get('price', 0) or 0
             year_built = row.get('year_built')
             
-            expander_title = f"📌 {brand} {model} - {price:,.0f} NOK"
+            status = (row.get('status') or 'active')
+            status_marker = {
+                'active': '🟢',
+                'sold': '💰 SOLGT',
+                'expired': '⚫ Inaktiv',
+            }.get(status, status)
+            
+            expander_title = f"{status_marker} | 📌 {brand} {model} - {price:,.0f} NOK"
             if pd.notna(year_built):
                 expander_title += f" - {int(year_built)}"
             else:
@@ -563,8 +608,20 @@ def main():
                     
                     if row.get('finn_code'):
                         st.caption(f"FINN Code: {row['finn_code']}")
+                    
+                    # Lifecycle status + dates
+                    status_label = {
+                        'active': '🟢 Active',
+                        'sold': '💰 Sold (SOLGT)',
+                        'expired': '⚫ Expired (Inaktiv)',
+                    }.get(status, status)
+                    st.caption(f"Status: {status_label}")
+                    if row.get('date_created'):
+                        st.caption(f"First seen: {row['date_created']}")
                     if row.get('date_updated'):
                         st.caption(f"Updated: {row['date_updated']}")
+                    if pd.notna(row.get('date_taken_offline')) and row.get('date_taken_offline'):
+                        st.caption(f"Taken offline: {row['date_taken_offline']}")
 
     # TAB 5: Price History
     with tab5:
